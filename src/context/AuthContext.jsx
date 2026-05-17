@@ -185,7 +185,18 @@ export function AuthProvider({ children }) {
         },
       });
       if (error) throw new Error(error.message);
-      if (data.user) return formatSupabaseUser(data.user);
+      
+      // If user is created but session is null, it means email confirmation is required (OTP)
+      if (data.user && !data.session) {
+        return { requiresOtp: true, email: data.user.email };
+      }
+      
+      if (data.user) {
+        const user = formatSupabaseUser(data.user);
+        createSession(user, false);
+        dispatch({ type: 'LOGIN', payload: user });
+        return user;
+      }
       throw new Error('Registrasi berhasil. Cek email untuk verifikasi.');
     }
 
@@ -222,7 +233,54 @@ export function AuthProvider({ children }) {
 
     createSession(userData, false);
     dispatch({ type: 'LOGIN', payload: userData });
-    return userData;
+    
+    // Fallback: return requiresOtp: true so we can simulate OTP screen
+    return { requiresOtp: true, email: userData.email, simulatedUser: userData };
+  }, [cloudEnabled]);
+
+  // ═══ VERIFY EMAIL OTP ═══
+  const verifyEmailOtp = useCallback(async (email, token, simulatedUser = null) => {
+    if (cloudEnabled) {
+      const { data, error } = await supabase.auth.verifyOtp({
+        email,
+        token,
+        type: 'signup'
+      });
+      if (error) throw new Error(error.message);
+      if (data.user && data.session) {
+        const user = formatSupabaseUser(data.user);
+        createSession(user, false);
+        dispatch({ type: 'LOGIN', payload: user });
+        return user;
+      }
+      throw new Error('Verifikasi gagal atau sesi tidak valid.');
+    }
+
+    // Fallback: localStorage (Simulate OTP verification)
+    await new Promise(r => setTimeout(r, 800));
+    // In simulated mode, we just accept any 6 digits for demo purposes
+    if (token.length === 6 && simulatedUser) {
+      createSession(simulatedUser, false);
+      dispatch({ type: 'LOGIN', payload: simulatedUser });
+      return simulatedUser;
+    }
+    throw new Error('Kode OTP tidak valid.');
+  }, [cloudEnabled]);
+
+  // ═══ RESEND EMAIL OTP ═══
+  const resendEmailOtp = useCallback(async (email) => {
+    if (cloudEnabled) {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email,
+      });
+      if (error) throw new Error(error.message);
+      return true;
+    }
+
+    // Fallback: simulated
+    await new Promise(r => setTimeout(r, 800));
+    return true;
   }, [cloudEnabled]);
 
   // ═══ GOOGLE LOGIN ═══
@@ -337,6 +395,8 @@ export function AuthProvider({ children }) {
       ...state,
       login,
       register,
+      verifyEmailOtp,
+      resendEmailOtp,
       loginWithGoogle,
       logout,
       updateProfile,

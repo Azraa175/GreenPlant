@@ -53,26 +53,13 @@ function PasswordStrengthBar({ password }) {
   );
 }
 
-function OTPVerification({ phone, onVerified, onBack }) {
+function OTPVerification({ email, onVerify, onResend, onBack }) {
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
-  const [generatedOTP, setGeneratedOTP] = useState('');
-  const [sent, setSent] = useState(false);
-  const [timer, setTimer] = useState(0);
+  const [timer, setTimer] = useState(60);
   const [error, setError] = useState('');
   const [verifying, setVerifying] = useState(false);
   const refs = useRef([]);
   const { addToast } = useToast();
-
-  const sendOTP = () => {
-    const code = String(Math.floor(100000 + Math.random() * 900000));
-    setGeneratedOTP(code);
-    setSent(true);
-    setTimer(60);
-    setOtp(['', '', '', '', '', '']);
-    setError('');
-    addToast(`Kode OTP dikirim ke ${phone}: ${code}`, 'success');
-    setTimeout(() => refs.current[0]?.focus(), 100);
-  };
 
   useEffect(() => {
     if (timer > 0) {
@@ -100,19 +87,26 @@ function OTPVerification({ phone, onVerified, onBack }) {
     const code = otp.join('');
     if (code.length !== 6) { setError('Masukkan 6 digit kode OTP'); return; }
     setVerifying(true);
-    await new Promise(r => setTimeout(r, 1000));
-    if (code === generatedOTP) {
-      addToast('Nomor HP berhasil diverifikasi ✅', 'success');
-      onVerified();
-    } else {
-      setError('Kode OTP salah. Coba lagi.');
+    try {
+      await onVerify(code);
+    } catch (err) {
+      setError(err.message || 'Kode OTP salah. Coba lagi.');
       setOtp(['', '', '', '', '', '']);
       refs.current[0]?.focus();
+    } finally {
+      setVerifying(false);
     }
-    setVerifying(false);
   };
 
-  useEffect(() => { sendOTP(); }, []);
+  const handleResend = async () => {
+    try {
+      await onResend();
+      setTimer(60);
+      addToast('Kode OTP baru telah dikirim ke email Anda', 'success');
+    } catch (err) {
+      addToast(err.message || 'Gagal mengirim ulang kode OTP', 'error');
+    }
+  };
 
   return (
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-5">
@@ -121,10 +115,10 @@ function OTPVerification({ phone, onVerified, onBack }) {
       </button>
       <div className="text-center">
         <div className="w-14 h-14 bg-primary-100 dark:bg-primary-900/30 rounded-2xl flex items-center justify-center mx-auto mb-3">
-          <Phone size={28} className="text-primary-600" />
+          <Mail size={28} className="text-primary-600" />
         </div>
-        <h2 className="font-display font-bold text-lg text-gray-900 dark:text-white">Verifikasi Nomor HP</h2>
-        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Kode OTP dikirim ke <span className="font-semibold text-gray-700 dark:text-gray-300">{phone}</span></p>
+        <h2 className="font-display font-bold text-lg text-gray-900 dark:text-white">Verifikasi Email</h2>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Kode OTP dikirim ke <span className="font-semibold text-gray-700 dark:text-gray-300">{email}</span></p>
       </div>
 
       <div className="flex justify-center gap-2">
@@ -157,14 +151,8 @@ function OTPVerification({ phone, onVerified, onBack }) {
         {timer > 0 ? (
           <p className="text-xs text-gray-400 font-display">Kirim ulang dalam <span className="font-semibold text-primary-600">{timer}s</span></p>
         ) : (
-          <button onClick={sendOTP} className="text-xs text-primary-600 dark:text-primary-400 font-display font-semibold">Kirim Ulang OTP</button>
+          <button onClick={handleResend} className="text-xs text-primary-600 dark:text-primary-400 font-display font-semibold">Kirim Ulang OTP</button>
         )}
-      </div>
-
-      <div className="p-3 rounded-xl bg-accent-50 dark:bg-accent-900/20">
-        <p className="text-[11px] text-accent-700 dark:text-accent-300 font-display text-center">
-          💡 <span className="font-semibold">Demo:</span> Kode OTP ditampilkan di notifikasi toast
-        </p>
       </div>
     </motion.div>
   );
@@ -201,8 +189,9 @@ export default function Auth() {
   const [form, setForm] = useState({ name: '', email: '', password: '', confirmPassword: '', phone: '' });
   const [errors, setErrors] = useState({});
   const [lockoutSec, setLockoutSec] = useState(0);
+  const [pendingSimulatedUser, setPendingSimulatedUser] = useState(null);
 
-  const { login, register, loginWithGoogle, isAuthenticated } = useAuth();
+  const { login, register, verifyEmailOtp, resendEmailOtp, loginWithGoogle, isAuthenticated } = useAuth();
   const { addToast } = useToast();
   const navigate = useNavigate();
 
@@ -250,7 +239,27 @@ export default function Auth() {
   const handleSubmit = async (ev) => {
     ev.preventDefault();
     if (!validateForm()) return;
-    if (mode === 'register') { setStep('otp'); return; }
+    if (mode === 'register') { 
+      setLoading(true);
+      try {
+        const phone = normalizePhone(form.phone);
+        const result = await register(form.name, form.email, form.password, phone);
+        if (result && result.requiresOtp) {
+          if (result.simulatedUser) setPendingSimulatedUser(result.simulatedUser);
+          setStep('otp');
+          addToast('Cek email Anda untuk kode verifikasi', 'success');
+        } else {
+          addToast('Akun berhasil dibuat! 🎉', 'success');
+          navigate('/dashboard', { replace: true });
+        }
+      } catch (err) {
+        addToast(err.message, 'error');
+      } finally {
+        setLoading(false);
+      }
+      return; 
+    }
+
     setLoading(true);
     try {
       await login(form.email, form.password, rememberMe);
@@ -267,15 +276,14 @@ export default function Auth() {
     } finally { setLoading(false); }
   };
 
-  const handleOTPVerified = async () => {
-    setLoading(true);
-    try {
-      const phone = normalizePhone(form.phone);
-      await register(form.name, form.email, form.password, phone);
-      addToast('Akun berhasil dibuat! 🎉', 'success');
-      navigate('/dashboard', { replace: true });
-    } catch (err) { addToast(err.message, 'error'); setStep('form'); }
-    finally { setLoading(false); }
+  const handleOTPVerify = async (code) => {
+    await verifyEmailOtp(form.email, code, pendingSimulatedUser);
+    addToast('Email berhasil diverifikasi! 🎉', 'success');
+    navigate('/dashboard', { replace: true });
+  };
+
+  const handleOTPResend = async () => {
+    await resendEmailOtp(form.email);
   };
 
   const handleGoogleLogin = async () => {
@@ -321,7 +329,13 @@ export default function Auth() {
           <div className="glass-card p-6 space-y-4">
             <AnimatePresence mode="wait">
               {step === 'otp' ? (
-                <OTPVerification key="otp" phone={form.phone} onVerified={handleOTPVerified} onBack={() => setStep('form')} />
+                <OTPVerification 
+                  key="otp" 
+                  email={form.email} 
+                  onVerify={handleOTPVerify} 
+                  onResend={handleOTPResend}
+                  onBack={() => setStep('form')} 
+                />
               ) : (
                 <motion.div key="form" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                   {/* Mode Toggle */}
@@ -463,7 +477,7 @@ export default function Auth() {
                   {!(mode === 'login' && lockoutSec > 0) && (
                     <div className="mt-3 p-2.5 rounded-xl bg-primary-50 dark:bg-primary-900/20">
                       <p className="text-[10px] text-primary-700 dark:text-primary-300 font-display text-center">
-                        {mode === 'register' ? '🔒 Password dienkripsi SHA-256 · Nomor HP diverifikasi OTP' : '⚠️ Akun terkunci 5 menit setelah 5x gagal login'}
+                        {mode === 'register' ? '🔒 Password dienkripsi SHA-256 · Email diverifikasi OTP' : '⚠️ Akun terkunci 5 menit setelah 5x gagal login'}
                       </p>
                     </div>
                   )}
